@@ -57,9 +57,9 @@ BEGIN
 END;
 /
 
--- T4. No se asignan puestos de licencias vencidas
+-- T4. No se asignan puestos de licencias vencidas (ni a empleados ni a equipos)
 CREATE OR REPLACE TRIGGER trg_asig_licencia_validar
-BEFORE INSERT OR UPDATE OF id_licencia, id_empleado ON asignacion_licencia
+BEFORE INSERT OR UPDATE OF id_licencia, id_empleado, id_equipo ON asignacion_licencia
 FOR EACH ROW
 DECLARE
   v_vencimiento licencia.fecha_vencimiento%TYPE;

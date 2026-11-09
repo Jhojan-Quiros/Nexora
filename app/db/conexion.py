@@ -1,8 +1,7 @@
 """Módulo de conexión a Oracle.
 
 Toda la comunicación con la base de datos pasa por esta clase y se hace
-EXCLUSIVAMENTE llamando procedimientos y funciones almacenados
-(callproc / callfunc). El proyecto no contiene sentencias SQL.
+llamando procedimientos y funciones de los paquetes PL/SQL (callproc / callfunc).
 """
 from __future__ import annotations
 
@@ -131,13 +130,30 @@ class BaseDatos:
         finally:
             cursor.close()
 
-    def consultar(self, procedimiento: str, entradas: Sequence[Any] = ()) -> Resultado:
-        """Ejecuta un procedimiento cuyo ÚLTIMO parámetro es OUT SYS_REFCURSOR."""
+    def guardar(self, procedimiento: str, id_registro: int | None, datos: Sequence[Any]) -> int:
+        """Ejecuta un procedimiento pr_guardar cuyo PRIMER parámetro es el id IN OUT.
+
+        Con id_registro = None la base de datos inserta; con un id, modifica.
+        Devuelve el id del registro y confirma la transacción.
+        """
         cursor = self.conexion.cursor()
         try:
-            ref = cursor.var(oracledb.DB_TYPE_CURSOR)
-            cursor.callproc(procedimiento, [*entradas, ref])
-            cursor_resultado = ref.getvalue()
+            id_var = cursor.var(int)
+            id_var.setvalue(0, id_registro)
+            cursor.callproc(procedimiento, [id_var, *datos])
+            self.conexion.commit()
+            return id_var.getvalue()
+        except oracledb.DatabaseError as exc:
+            self.conexion.rollback()
+            raise _traducir_error(exc) from exc
+        finally:
+            cursor.close()
+
+    def consultar(self, funcion: str, entradas: Sequence[Any] = ()) -> Resultado:
+        """Invoca una función que devuelve SYS_REFCURSOR y lee todas sus filas."""
+        cursor = self.conexion.cursor()
+        try:
+            cursor_resultado = cursor.callfunc(funcion, oracledb.DB_TYPE_CURSOR, list(entradas))
             try:
                 columnas = [d[0] for d in cursor_resultado.description]
                 filas = cursor_resultado.fetchall()

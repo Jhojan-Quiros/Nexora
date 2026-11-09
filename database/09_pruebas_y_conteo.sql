@@ -5,36 +5,19 @@
 -- =====================================================================
 SET SERVEROUTPUT ON
 
--- 1) Reportes impresos con cursores
+-- 1) Funciones escalares
 BEGIN
-  DBMS_OUTPUT.PUT_LINE('--- Departamentos ---');
-  pkg_departamento.pr_imprimir_resumen;
-  DBMS_OUTPUT.PUT_LINE(CHR(10) || '--- Carga por técnico ---');
-  pkg_reportes.pr_imprimir_tickets_por_tecnico;
-  DBMS_OUTPUT.PUT_LINE(CHR(10) || '--- Equipos por departamento ---');
-  pkg_reportes.pr_imprimir_equipos_departamento;
-  DBMS_OUTPUT.PUT_LINE(CHR(10) || '--- Alertas de licencias (30 días) ---');
-  pkg_licencia.pr_imprimir_alertas(30);
-END;
-/
-
--- 2) Funciones
-DECLARE
-  v_resumen VARCHAR2(400);
-BEGIN
-  pkg_equipo.pr_resumen_inventario(v_resumen);
-  DBMS_OUTPUT.PUT_LINE('Inventario: ' || v_resumen);
+  DBMS_OUTPUT.PUT_LINE('Inventario: ' || pkg_equipo.fn_resumen_inventario);
   DBMS_OUTPUT.PUT_LINE('Promedio de resolución (h): ' || pkg_ticket.fn_promedio_resolucion);
-  DBMS_OUTPUT.PUT_LINE('Departamento con más tickets: ' || pkg_reportes.fn_departamento_mas_tickets);
-  DBMS_OUTPUT.PUT_LINE('Técnico con menor carga: ' || pkg_tecnico.fn_tecnico_menor_carga);
-  DBMS_OUTPUT.PUT_LINE('Login admin válido (id): ' || pkg_seguridad.fn_validar_login('admin', 'Admin2026'));
-  DBMS_OUTPUT.PUT_LINE('Login con clave errónea: ' || pkg_seguridad.fn_validar_login('admin', 'xxxx'));
+  DBMS_OUTPUT.PUT_LINE('Técnico con menor carga: ' || pkg_tecnico.fn_menor_carga);
+  DBMS_OUTPUT.PUT_LINE('Puestos libres de la licencia 1: ' || pkg_licencia.fn_disponibles(1));
+  DBMS_OUTPUT.PUT_LINE('Hash de prueba: ' || pkg_utilidades.fn_hash_contrasena('admin', 'Admin2026'));
 END;
 /
 
--- 3) Reglas de negocio: cada bloque DEBE fallar con un mensaje controlado
+-- 2) Reglas de negocio: cada bloque DEBE fallar con un mensaje controlado
 BEGIN
-  pkg_equipo.pr_dar_baja(1);  -- equipo asignado
+  pkg_equipo.pr_cambiar_estado(1, 'BAJA');  -- equipo asignado
 EXCEPTION WHEN OTHERS THEN DBMS_OUTPUT.PUT_LINE('OK regla -> ' || SQLERRM);
 END;
 /
@@ -45,18 +28,30 @@ END;
 /
 DECLARE v_id NUMBER;
 BEGIN
-  pkg_empleado.pr_insertar(1, 'Prueba', 'correo-malo', 'prueba', 'abc', 'EMPLEADO', v_id);
+  pkg_empleado.pr_guardar(v_id, 1, 'Prueba', 'correo-malo', 'prueba', 'abc', 'EMPLEADO');
+EXCEPTION WHEN OTHERS THEN DBMS_OUTPUT.PUT_LINE('OK regla -> ' || SQLERRM);
+END;
+/
+DECLARE v_id NUMBER;
+BEGIN
+  pkg_asignacion_licencia.pr_asignar(1, 5, 1, v_id);  -- empleado y equipo a la vez
 EXCEPTION WHEN OTHERS THEN DBMS_OUTPUT.PUT_LINE('OK regla -> ' || SQLERRM);
 END;
 /
 ROLLBACK;
 
--- 4) Cursor de referencia, como lo consume la aplicación
+-- 3) Cursores de referencia, como los consume la aplicación
 VARIABLE rc REFCURSOR
-EXEC pkg_ticket.pr_filtrar('EN_PROCESO', NULL, NULL, NULL, 'N', :rc)
+EXEC :rc := pkg_ticket.fn_listar(NULL, 'EN_PROCESO', NULL, NULL, NULL, 'N')
+PRINT rc
+EXEC :rc := pkg_asignacion_licencia.fn_listar(NULL, NULL, NULL)
+PRINT rc
+EXEC :rc := pkg_reportes.fn_reporte('TECNICOS')
+PRINT rc
+EXEC :rc := pkg_reportes.fn_reporte('LICENCIAS_VENCER', 30)
 PRINT rc
 
--- 5) Conteo de objetos programados -----------------------------------
+-- 4) Conteo de objetos programados -----------------------------------
 -- Objetos del esquema
 SELECT object_type, COUNT(*) AS total
   FROM user_objects
@@ -64,7 +59,7 @@ SELECT object_type, COUNT(*) AS total
  GROUP BY object_type
  ORDER BY object_type;
 
--- Procedimientos y funciones dentro de los paquetes (solo los declarados en la especificación)
+-- Procedimientos y funciones dentro de los paquetes (esperado: 27 y 20)
 SELECT CASE WHEN EXISTS (SELECT 1 FROM user_arguments a
                           WHERE a.package_name = p.object_name
                             AND a.object_name  = p.procedure_name

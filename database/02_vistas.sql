@@ -1,7 +1,15 @@
 -- =====================================================================
--- 02_vistas.sql  -  14 vistas
--- Los procedimientos de consulta abren sus cursores sobre estas vistas.
+-- 02_vistas.sql  -  12 vistas
+-- Las funciones de consulta abren sus cursores sobre estas vistas.
 -- =====================================================================
+
+-- Limpieza: elimina vistas de versiones anteriores del esquema
+BEGIN
+  FOR v IN (SELECT view_name FROM user_views) LOOP
+    EXECUTE IMMEDIATE 'DROP VIEW ' || v.view_name;
+  END LOOP;
+END;
+/
 
 -- V01. Empleados con su departamento
 CREATE OR REPLACE VIEW v_empleados_detalle AS
@@ -65,8 +73,8 @@ SELECT q.id_equipo,
         AND ae.fecha_fin IS NULL
   LEFT JOIN empleado e ON e.id_empleado = ae.id_empleado;
 
--- V05. Asignaciones de equipo vigentes
-CREATE OR REPLACE VIEW v_asignaciones_activas AS
+-- V05. Historial de asignaciones de equipo (vigentes y finalizadas, RF-03)
+CREATE OR REPLACE VIEW v_asignaciones_equipo AS
 SELECT ae.id_asig_equipo,
        ae.id_equipo,
        q.tipo,
@@ -76,30 +84,16 @@ SELECT ae.id_asig_equipo,
        e.nombre_completo AS empleado,
        d.nombre          AS departamento,
        ae.fecha_inicio,
-       TRUNC(SYSDATE) - TRUNC(ae.fecha_inicio) AS dias_asignado
+       ae.fecha_fin,
+       CASE WHEN ae.fecha_fin IS NULL THEN 'VIGENTE' ELSE 'FINALIZADA' END AS situacion,
+       TRUNC(NVL(ae.fecha_fin, SYSDATE)) - TRUNC(ae.fecha_inicio) AS dias,
+       TRUNC(NVL(ae.fecha_fin, SYSDATE)) - TRUNC(ae.fecha_inicio) AS dias_asignado
   FROM asignacion_equipo ae
   JOIN equipo q       ON q.id_equipo = ae.id_equipo
   JOIN empleado e     ON e.id_empleado = ae.id_empleado
-  JOIN departamento d ON d.id_departamento = e.id_departamento
- WHERE ae.fecha_fin IS NULL;
+  JOIN departamento d ON d.id_departamento = e.id_departamento;
 
--- V06. Historial completo de asignaciones de equipo
-CREATE OR REPLACE VIEW v_historial_asignaciones AS
-SELECT ae.id_asig_equipo,
-       ae.id_equipo,
-       q.numero_serie,
-       q.marca || ' ' || q.modelo AS equipo,
-       ae.id_empleado,
-       e.nombre_completo AS empleado,
-       ae.fecha_inicio,
-       ae.fecha_fin,
-       CASE WHEN ae.fecha_fin IS NULL THEN 'VIGENTE' ELSE 'FINALIZADA' END AS situacion,
-       TRUNC(NVL(ae.fecha_fin, SYSDATE)) - TRUNC(ae.fecha_inicio) AS dias
-  FROM asignacion_equipo ae
-  JOIN equipo q   ON q.id_equipo = ae.id_equipo
-  JOIN empleado e ON e.id_empleado = ae.id_empleado;
-
--- V07. Uso y vigencia de licencias (sin exponer la clave)
+-- V06. Uso y vigencia de licencias, sin exponer la clave (RF-08, RF-09)
 CREATE OR REPLACE VIEW v_licencias_uso AS
 SELECT l.id_licencia,
        l.software,
@@ -107,6 +101,8 @@ SELECT l.id_licencia,
        l.fecha_vencimiento,
        l.cantidad,
        COUNT(al.id_asig_licencia)              AS asignadas,
+       COUNT(al.id_empleado)                   AS en_empleados,
+       COUNT(al.id_equipo)                     AS en_equipos,
        l.cantidad - COUNT(al.id_asig_licencia) AS disponibles,
        TRUNC(l.fecha_vencimiento) - TRUNC(SYSDATE) AS dias_restantes,
        CASE
@@ -118,13 +114,27 @@ SELECT l.id_licencia,
   LEFT JOIN asignacion_licencia al ON al.id_licencia = l.id_licencia
  GROUP BY l.id_licencia, l.software, l.proveedor, l.fecha_vencimiento, l.cantidad;
 
--- V08. Licencias que vencen en los próximos 30 días (RF-09)
-CREATE OR REPLACE VIEW v_licencias_por_vencer AS
-SELECT *
-  FROM v_licencias_uso
- WHERE dias_restantes BETWEEN 0 AND 30;
+-- V07. Puestos de licencia asignados a empleados o a equipos (RF-08)
+CREATE OR REPLACE VIEW v_asignaciones_licencia AS
+SELECT al.id_asig_licencia,
+       al.id_licencia,
+       l.software,
+       l.proveedor,
+       l.fecha_vencimiento,
+       CASE WHEN al.id_empleado IS NOT NULL THEN 'EMPLEADO' ELSE 'EQUIPO' END AS destino,
+       al.id_empleado,
+       e.nombre_completo AS empleado,
+       al.id_equipo,
+       q.numero_serie,
+       NVL(e.nombre_completo, q.tipo || ' ' || q.marca || ' ' || q.modelo || ' (' || q.numero_serie || ')')
+                         AS asignada_a,
+       al.fecha_asignacion
+  FROM asignacion_licencia al
+  JOIN licencia l      ON l.id_licencia = al.id_licencia
+  LEFT JOIN empleado e ON e.id_empleado = al.id_empleado
+  LEFT JOIN equipo q   ON q.id_equipo = al.id_equipo;
 
--- V09. Tickets con todos sus datos descriptivos
+-- V08. Tickets con todos sus datos descriptivos
 CREATE OR REPLACE VIEW v_tickets_detalle AS
 SELECT t.id_ticket,
        t.titulo,
@@ -152,13 +162,7 @@ SELECT t.id_ticket,
   LEFT JOIN empleado et ON et.id_empleado = tc.id_empleado
   LEFT JOIN equipo q    ON q.id_equipo = t.id_equipo;
 
--- V10. Tickets pendientes de atención
-CREATE OR REPLACE VIEW v_tickets_abiertos AS
-SELECT *
-  FROM v_tickets_detalle
- WHERE estado IN ('ABIERTO','EN_PROCESO');
-
--- V11. Carga y desempeño por técnico (RF-10)
+-- V09. Carga y desempeño por técnico (RF-10)
 CREATE OR REPLACE VIEW v_tickets_por_tecnico AS
 SELECT tc.id_tecnico,
        e.nombre_completo AS tecnico,
@@ -175,7 +179,7 @@ SELECT tc.id_tecnico,
   LEFT JOIN ticket t ON t.id_tecnico = tc.id_tecnico
  GROUP BY tc.id_tecnico, e.nombre_completo, tc.especialidad, tc.nivel;
 
--- V12. Tiempo de resolución por categoría y prioridad (RF-10)
+-- V10. Tiempo de resolución por categoría y prioridad (RF-10)
 CREATE OR REPLACE VIEW v_tiempo_resolucion AS
 SELECT categoria,
        prioridad,
@@ -188,7 +192,7 @@ SELECT categoria,
    AND id_tecnico IS NOT NULL
  GROUP BY categoria, prioridad;
 
--- V13. Equipos asignados por departamento (RF-10)
+-- V11. Equipos asignados por departamento (RF-10)
 CREATE OR REPLACE VIEW v_equipos_por_departamento AS
 SELECT d.id_departamento,
        d.nombre AS departamento,
@@ -205,7 +209,7 @@ SELECT d.id_departamento,
   LEFT JOIN equipo q ON q.id_equipo = ae.id_equipo
  GROUP BY d.id_departamento, d.nombre;
 
--- V14. Comentarios de seguimiento con el nombre del técnico
+-- V12. Comentarios de seguimiento con el nombre del técnico (RF-07)
 CREATE OR REPLACE VIEW v_comentarios_detalle AS
 SELECT c.id_comentario,
        c.id_ticket,
@@ -218,31 +222,3 @@ SELECT c.id_comentario,
   JOIN ticket t   ON t.id_ticket = c.id_ticket
   JOIN tecnico tc ON tc.id_tecnico = c.id_tecnico
   JOIN empleado e ON e.id_empleado = tc.id_empleado;
-
--- V15. Diccionario de datos del esquema (complemento a SQL Developer)
-CREATE OR REPLACE VIEW v_diccionario_datos AS
-SELECT c.table_name  AS tabla,
-       tc.comments   AS descripcion_tabla,
-       c.column_id   AS orden,
-       c.column_name AS columna,
-       CASE
-         WHEN c.data_type IN ('VARCHAR2','CHAR') THEN c.data_type || '(' || c.char_length || ')'
-         WHEN c.data_type = 'NUMBER' AND c.data_precision IS NOT NULL
-              THEN c.data_type || '(' || c.data_precision || ',' || c.data_scale || ')'
-         ELSE c.data_type
-       END AS tipo_dato,
-       DECODE(c.nullable, 'N', 'NO', 'SI') AS permite_nulos,
-       (SELECT LISTAGG(DECODE(uc.constraint_type, 'P','PK', 'R','FK', 'U','UQ'), ',')
-                 WITHIN GROUP (ORDER BY uc.constraint_type)
-          FROM user_cons_columns ucc
-          JOIN user_constraints  uc ON uc.constraint_name = ucc.constraint_name
-         WHERE ucc.table_name  = c.table_name
-           AND ucc.column_name = c.column_name
-           AND uc.constraint_type IN ('P','R','U')) AS llaves,
-       cc.comments AS descripcion
-  FROM user_tab_columns c
-  JOIN user_tables t ON t.table_name = c.table_name
-  LEFT JOIN user_tab_comments tc ON tc.table_name = c.table_name
-  LEFT JOIN user_col_comments cc
-         ON cc.table_name  = c.table_name
-        AND cc.column_name = c.column_name;

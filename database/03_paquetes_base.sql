@@ -14,14 +14,12 @@ CREATE OR REPLACE PACKAGE pkg_utilidades AS
   c_err_no_existe  CONSTANT PLS_INTEGER := -20002;
   c_err_regla      CONSTANT PLS_INTEGER := -20003;
 
-  FUNCTION fn_hash_contrasena (p_usuario IN VARCHAR2, p_contrasena IN VARCHAR2) RETURN VARCHAR2;
-  FUNCTION fn_correo_valido   (p_correo IN VARCHAR2) RETURN NUMBER;
-  FUNCTION fn_contrasena_segura (p_contrasena IN VARCHAR2) RETURN NUMBER;
+  FUNCTION  fn_hash_contrasena   (p_usuario IN VARCHAR2, p_contrasena IN VARCHAR2) RETURN VARCHAR2;
+  FUNCTION  fn_correo_valido     (p_correo IN VARCHAR2) RETURN NUMBER;
+  FUNCTION  fn_contrasena_segura (p_contrasena IN VARCHAR2) RETURN NUMBER;
 
   PROCEDURE pr_validar_requerido (p_valor IN VARCHAR2, p_campo IN VARCHAR2);
-  PROCEDURE pr_error_validacion  (p_mensaje IN VARCHAR2);
-  PROCEDURE pr_error_no_existe   (p_entidad IN VARCHAR2, p_id IN NUMBER);
-  PROCEDURE pr_error_regla       (p_mensaje IN VARCHAR2);
+  PROCEDURE pr_error             (p_codigo IN PLS_INTEGER, p_mensaje IN VARCHAR2);
 END pkg_utilidades;
 /
 
@@ -60,36 +58,24 @@ CREATE OR REPLACE PACKAGE BODY pkg_utilidades AS
   PROCEDURE pr_validar_requerido (p_valor IN VARCHAR2, p_campo IN VARCHAR2) IS
   BEGIN
     IF TRIM(p_valor) IS NULL THEN
-      pr_error_validacion('El campo "' || p_campo || '" es obligatorio.');
+      pr_error(c_err_validacion, 'El campo "' || p_campo || '" es obligatorio.');
     END IF;
   END pr_validar_requerido;
 
-  PROCEDURE pr_error_validacion (p_mensaje IN VARCHAR2) IS
+  -- Punto único para lanzar errores de negocio con su código
+  PROCEDURE pr_error (p_codigo IN PLS_INTEGER, p_mensaje IN VARCHAR2) IS
   BEGIN
-    RAISE_APPLICATION_ERROR(c_err_validacion, p_mensaje);
-  END pr_error_validacion;
-
-  PROCEDURE pr_error_no_existe (p_entidad IN VARCHAR2, p_id IN NUMBER) IS
-  BEGIN
-    RAISE_APPLICATION_ERROR(c_err_no_existe, p_entidad || ' con id ' || NVL(TO_CHAR(p_id), '(nulo)') || ' no existe.');
-  END pr_error_no_existe;
-
-  PROCEDURE pr_error_regla (p_mensaje IN VARCHAR2) IS
-  BEGIN
-    RAISE_APPLICATION_ERROR(c_err_regla, p_mensaje);
-  END pr_error_regla;
+    RAISE_APPLICATION_ERROR(p_codigo, p_mensaje);
+  END pr_error;
 
 END pkg_utilidades;
 /
 
 -- ---------------------------------------------------------------------
--- PAQUETE 2: PKG_SEGURIDAD
+-- PAQUETE 2: PKG_SEGURIDAD  (RF-12)
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE PACKAGE pkg_seguridad AS
-  FUNCTION  fn_validar_login (p_usuario IN VARCHAR2, p_contrasena IN VARCHAR2) RETURN NUMBER;
-  FUNCTION  fn_tiene_rol     (p_id_empleado IN NUMBER, p_rol IN VARCHAR2) RETURN NUMBER;
-  PROCEDURE pr_iniciar_sesion (p_usuario IN VARCHAR2, p_contrasena IN VARCHAR2,
-                               p_cursor OUT SYS_REFCURSOR);
+  FUNCTION  fn_iniciar_sesion (p_usuario IN VARCHAR2, p_contrasena IN VARCHAR2) RETURN SYS_REFCURSOR;
   PROCEDURE pr_cambiar_contrasena (p_id_empleado IN NUMBER, p_actual IN VARCHAR2,
                                    p_nueva IN VARCHAR2);
 END pkg_seguridad;
@@ -97,56 +83,41 @@ END pkg_seguridad;
 
 CREATE OR REPLACE PACKAGE BODY pkg_seguridad AS
 
-  -- Devuelve el id del empleado si las credenciales son válidas, o 0
-  FUNCTION fn_validar_login (p_usuario IN VARCHAR2, p_contrasena IN VARCHAR2) RETURN NUMBER IS
-    v_id   empleado.id_empleado%TYPE;
-    v_hash empleado.contrasena_hash%TYPE;
-  BEGIN
-    v_hash := pkg_utilidades.fn_hash_contrasena(p_usuario, p_contrasena);
-    SELECT id_empleado
-      INTO v_id
-      FROM empleado
-     WHERE usuario = LOWER(TRIM(p_usuario))
-       AND contrasena_hash = v_hash
-       AND activo = 'S';
-    RETURN v_id;
-  EXCEPTION
-    WHEN NO_DATA_FOUND THEN
-      RETURN 0;
-  END fn_validar_login;
-
-  FUNCTION fn_tiene_rol (p_id_empleado IN NUMBER, p_rol IN VARCHAR2) RETURN NUMBER IS
-    v_total NUMBER;
-  BEGIN
-    SELECT COUNT(*)
-      INTO v_total
-      FROM empleado
-     WHERE id_empleado = p_id_empleado
-       AND rol = UPPER(p_rol)
-       AND activo = 'S';
-    RETURN v_total;
-  END fn_tiene_rol;
-
-  PROCEDURE pr_iniciar_sesion (p_usuario IN VARCHAR2, p_contrasena IN VARCHAR2,
-                               p_cursor OUT SYS_REFCURSOR) IS
-    v_id NUMBER;
+  -- CURSOR 1: valida las credenciales y devuelve los datos de la sesión
+  FUNCTION fn_iniciar_sesion (p_usuario IN VARCHAR2, p_contrasena IN VARCHAR2) RETURN SYS_REFCURSOR IS
+    CURSOR c_credenciales (cp_usuario VARCHAR2, cp_hash VARCHAR2) IS
+      SELECT id_empleado
+        FROM empleado
+       WHERE usuario = cp_usuario
+         AND contrasena_hash = cp_hash
+         AND activo = 'S';
+    v_id     empleado.id_empleado%TYPE;
+    v_cursor SYS_REFCURSOR;
   BEGIN
     pkg_utilidades.pr_validar_requerido(p_usuario, 'usuario');
     pkg_utilidades.pr_validar_requerido(p_contrasena, 'contraseña');
-    v_id := fn_validar_login(p_usuario, p_contrasena);
-    IF v_id = 0 THEN
-      pkg_utilidades.pr_error_validacion('Usuario o contraseña incorrectos, o el usuario está inactivo.');
-    END IF;
 
-    OPEN p_cursor FOR
+    OPEN c_credenciales(LOWER(TRIM(p_usuario)),
+                        pkg_utilidades.fn_hash_contrasena(p_usuario, p_contrasena));
+    FETCH c_credenciales INTO v_id;
+    IF c_credenciales%NOTFOUND THEN
+      CLOSE c_credenciales;
+      pkg_utilidades.pr_error(pkg_utilidades.c_err_validacion,
+        'Usuario o contraseña incorrectos, o el usuario está inactivo.');
+    END IF;
+    CLOSE c_credenciales;
+
+    OPEN v_cursor FOR
       SELECT e.id_empleado, e.nombre_completo, e.usuario, e.rol,
              e.id_departamento, d.nombre AS departamento, t.id_tecnico
         FROM empleado e
         JOIN departamento d ON d.id_departamento = e.id_departamento
         LEFT JOIN tecnico t ON t.id_empleado = e.id_empleado AND t.activo = 'S'
        WHERE e.id_empleado = v_id;
-  END pr_iniciar_sesion;
+    RETURN v_cursor;
+  END fn_iniciar_sesion;
 
+  -- Con p_actual = NULL el administrador restablece la contraseña sin conocer la anterior
   PROCEDURE pr_cambiar_contrasena (p_id_empleado IN NUMBER, p_actual IN VARCHAR2,
                                    p_nueva IN VARCHAR2) IS
     v_usuario empleado.usuario%TYPE;
@@ -159,14 +130,16 @@ CREATE OR REPLACE PACKAGE BODY pkg_seguridad AS
        WHERE id_empleado = p_id_empleado;
     EXCEPTION
       WHEN NO_DATA_FOUND THEN
-        pkg_utilidades.pr_error_no_existe('Empleado', p_id_empleado);
+        pkg_utilidades.pr_error(pkg_utilidades.c_err_no_existe,
+          'El empleado con id ' || p_id_empleado || ' no existe.');
     END;
 
-    IF v_hash <> pkg_utilidades.fn_hash_contrasena(v_usuario, p_actual) THEN
-      pkg_utilidades.pr_error_validacion('La contraseña actual no es correcta.');
+    IF p_actual IS NOT NULL AND v_hash <> pkg_utilidades.fn_hash_contrasena(v_usuario, p_actual) THEN
+      pkg_utilidades.pr_error(pkg_utilidades.c_err_validacion, 'La contraseña actual no es correcta.');
     END IF;
     IF pkg_utilidades.fn_contrasena_segura(p_nueva) = 0 THEN
-      pkg_utilidades.pr_error_validacion('La nueva contraseña debe tener al menos 8 caracteres, letras y números.');
+      pkg_utilidades.pr_error(pkg_utilidades.c_err_validacion,
+        'La nueva contraseña debe tener al menos 8 caracteres, letras y números.');
     END IF;
 
     UPDATE empleado

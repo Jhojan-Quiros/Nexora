@@ -30,7 +30,7 @@ class Seguridad:
 
     @classmethod
     def iniciar_sesion(cls, usuario: str, contrasena: str) -> Sesion:
-        fila = bd.consultar(f"{cls.PKG}.pr_iniciar_sesion", [usuario, contrasena]).primero()
+        fila = bd.consultar(f"{cls.PKG}.fn_iniciar_sesion", [usuario, contrasena]).primero()
         if fila is None:
             raise ErrorNegocio("No se pudo iniciar sesión.")
         return Sesion(
@@ -44,6 +44,8 @@ class Seguridad:
 
     @classmethod
     def cambiar_contrasena(cls, id_empleado: int, actual: str, nueva: str) -> None:
+        if not actual:
+            raise ErrorNegocio("Debe indicar la contraseña actual.")
         bd.ejecutar(f"{cls.PKG}.pr_cambiar_contrasena", [id_empleado, actual, nueva])
 
 
@@ -57,17 +59,14 @@ class Tickets:
     @classmethod
     def crear(cls, id_empleado: int, id_equipo: int | None, titulo: str, descripcion: str,
               categoria: str, prioridad: str) -> int:
-        (nuevo_id,) = bd.ejecutar(
-            f"{cls.PKG}.pr_crear",
-            [id_empleado, id_equipo, titulo, descripcion, categoria, prioridad],
-            [int],
-        )
-        return nuevo_id
+        return bd.guardar(f"{cls.PKG}.pr_guardar", None,
+                          [id_empleado, id_equipo, titulo, descripcion, categoria, prioridad])
 
     @classmethod
     def modificar(cls, id_ticket: int, titulo: str, descripcion: str, categoria: str,
                   prioridad: str) -> None:
-        bd.ejecutar(f"{cls.PKG}.pr_actualizar", [id_ticket, titulo, descripcion, categoria, prioridad])
+        bd.guardar(f"{cls.PKG}.pr_guardar", id_ticket,
+                   [None, None, titulo, descripcion, categoria, prioridad])
 
     @classmethod
     def asignar_tecnico(cls, id_ticket: int, id_tecnico: int) -> None:
@@ -88,34 +87,55 @@ class Tickets:
 
     @classmethod
     def obtener(cls, id_ticket: int) -> dict | None:
-        return bd.consultar(f"{cls.PKG}.pr_obtener", [id_ticket]).primero()
+        return bd.consultar(f"{cls.PKG}.fn_listar", [id_ticket, None, None, None, None, "N"]).primero()
 
     @classmethod
     def filtrar(cls, estado: str | None = None, prioridad: str | None = None,
                 id_tecnico: int | None = None, id_empleado: int | None = None,
                 sin_asignar: bool = False) -> Resultado:
         return bd.consultar(
-            f"{cls.PKG}.pr_filtrar",
-            [estado, prioridad, id_tecnico, id_empleado, "S" if sin_asignar else "N"],
+            f"{cls.PKG}.fn_listar",
+            [None, estado, prioridad, id_tecnico, id_empleado, "S" if sin_asignar else "N"],
         )
 
     @classmethod
     def comentarios(cls, id_ticket: int) -> Resultado:
-        """Solo lectura en esta entrega; el registro de comentarios (RF-07) llega en la semana 10."""
-        return bd.consultar("pkg_comentario.pr_listar_por_ticket", [id_ticket])
+        return bd.consultar("pkg_comentario.fn_listar", [id_ticket])
+
+    @classmethod
+    def comentar(cls, id_ticket: int, id_tecnico: int, texto: str) -> int:
+        """RF-07: registra un comentario de seguimiento del técnico."""
+        return bd.guardar("pkg_comentario.pr_guardar", None, [id_ticket, id_tecnico, texto])
 
 
 # ============================================================ PANEL RESUMEN
 class Panel:
     @staticmethod
     def resumen() -> dict[str, float]:
-        valores = bd.ejecutar(
-            "pkg_reportes.pr_panel_resumen", [], [int, int, int, int, int, int, float], confirmar=False
-        )
-        claves = ("abiertos", "en_proceso", "sin_asignar", "criticos",
-                  "equipos_disponibles", "licencias_por_vencer", "promedio_horas")
-        return dict(zip(claves, valores))
+        fila = bd.consultar("pkg_reportes.fn_panel_resumen").primero() or {}
+        return {clave.lower(): (valor or 0) for clave, valor in fila.items()}
 
     @staticmethod
     def tickets_por_tecnico() -> Resultado:
-        return bd.consultar("pkg_reportes.pr_tickets_por_tecnico")
+        return bd.consultar("pkg_reportes.fn_reporte", ["TECNICOS", None])
+
+
+# ============================================================ REPORTES (RF-10, RF-11)
+class Reportes:
+    TIPOS = ("TECNICOS", "ESTADOS", "RESOLUCION", "EQUIPOS_DEPARTAMENTO", "LICENCIAS_VENCER")
+
+    @staticmethod
+    def generar(tipo: str, dias: int = 30) -> Resultado:
+        return bd.consultar("pkg_reportes.fn_reporte", [tipo, dias])
+
+    @staticmethod
+    def exportar_csv(tipo: str, ruta: str, dias: int = 30) -> int:
+        """Guarda el reporte en un archivo CSV (UTF-8 con BOM para Excel). Devuelve las filas escritas."""
+        import csv
+
+        resultado = Reportes.generar(tipo, dias)
+        with open(ruta, "w", newline="", encoding="utf-8-sig") as archivo:
+            escritor = csv.writer(archivo)
+            escritor.writerow(resultado.columnas)
+            escritor.writerows(resultado.filas)
+        return len(resultado)
